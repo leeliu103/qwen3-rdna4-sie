@@ -2,6 +2,7 @@
 #define QWEN3_WEIGHTS_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "../../core/gguf_loader.h"
 #include "qwen3_config.h"
@@ -34,5 +35,12 @@ typedef struct {
 
     qwen3_layer_weights layer[QWEN3_N_LAYER];
 } qwen3_weights;
+
+bool qwen3_weights_bind(
+    qwen3_weights *w,
+    const gguf_file *g,
+    char *err,
+    size_t err_size
+);
 
 #endif
