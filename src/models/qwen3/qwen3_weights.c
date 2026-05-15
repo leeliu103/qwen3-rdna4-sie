@@ -1,8 +1,14 @@
 #include "qwen3_weights.h"
 
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+
+enum {
+    QWEN3_TENSOR_F32  = 0,
+    QWEN3_TENSOR_Q8_0 = 8,
+};
 
 static void set_error(char *err, size_t err_size, const char *fmt, ...) {
     va_list ap;
@@ -103,6 +109,98 @@ static const gguf_tensor *required_tensorf(
     return required_tensor(g, name, err, err_size);
 }
 
+static bool tensor_expect_layout(
+    const gguf_tensor *t,
+    uint32_t type,
+    uint32_t ndim,
+    uint64_t d0,
+    uint64_t d1,
+    uint64_t d2,
+    char *err,
+    size_t err_size
+) {
+    if (!t) {
+        set_error(err, err_size, "internal error: missing tensor while validating layout");
+        return false;
+    }
+    if (t->type != type) {
+        set_error(
+            err,
+            err_size,
+            "tensor %.*s has type %s, expected %s",
+            (int)t->name.len,
+            t->name.ptr,
+            gguf_type_name(t->type),
+            gguf_type_name(type)
+        );
+        return false;
+    }
+    if (t->ndim != ndim) {
+        set_error(
+            err,
+            err_size,
+            "tensor %.*s has %u dimensions, expected %u",
+            (int)t->name.len,
+            t->name.ptr,
+            t->ndim,
+            ndim
+        );
+        return false;
+    }
+
+    const uint64_t want[3] = { d0, d1, d2 };
+    for (uint32_t i = 0; i < ndim; i++) {
+        if (t->dim[i] == want[i]) continue;
+        set_error(
+            err,
+            err_size,
+            "tensor %.*s has dim[%u]=%" PRIu64 ", expected %" PRIu64,
+            (int)t->name.len,
+            t->name.ptr,
+            i,
+            t->dim[i],
+            want[i]
+        );
+        return false;
+    }
+
+    return true;
+}
+
+static bool weights_validate_layout(
+    const qwen3_weights *w,
+    char *err,
+    size_t err_size
+) {
+    const uint64_t q_dim = (uint64_t)QWEN3_N_HEAD * QWEN3_N_HEAD_DIM;
+    const uint64_t kv_dim = (uint64_t)QWEN3_N_HEAD_KV * QWEN3_N_HEAD_DIM;
+
+    if (!tensor_expect_layout(w->token_embd, QWEN3_TENSOR_Q8_0, 2, QWEN3_N_EMBD, QWEN3_N_VOCAB, 0, err, err_size)) return false;
+    if (!tensor_expect_layout(w->output_norm, QWEN3_TENSOR_F32, 1, QWEN3_N_EMBD, 0, 0, err, err_size)) return false;
+    if (!w->output_is_tied &&
+        !tensor_expect_layout(w->output, QWEN3_TENSOR_Q8_0, 2, QWEN3_N_EMBD, QWEN3_N_VOCAB, 0, err, err_size)) {
+        return false;
+    }
+
+    for (uint32_t il = 0; il < QWEN3_N_LAYER; il++) {
+        const qwen3_layer_weights *l = &w->layer[il];
+
+        if (!tensor_expect_layout(l->attn_norm, QWEN3_TENSOR_F32, 1, QWEN3_N_EMBD, 0, 0, err, err_size)) return false;
+        if (!tensor_expect_layout(l->attn_q, QWEN3_TENSOR_Q8_0, 2, QWEN3_N_EMBD, q_dim, 0, err, err_size)) return false;
+        if (!tensor_expect_layout(l->attn_k, QWEN3_TENSOR_Q8_0, 2, QWEN3_N_EMBD, kv_dim, 0, err, err_size)) return false;
+        if (!tensor_expect_layout(l->attn_v, QWEN3_TENSOR_Q8_0, 2, QWEN3_N_EMBD, kv_dim, 0, err, err_size)) return false;
+        if (!tensor_expect_layout(l->attn_output, QWEN3_TENSOR_Q8_0, 2, q_dim, QWEN3_N_EMBD, 0, err, err_size)) return false;
+        if (!tensor_expect_layout(l->attn_q_norm, QWEN3_TENSOR_F32, 1, QWEN3_N_HEAD_DIM, 0, 0, err, err_size)) return false;
+        if (!tensor_expect_layout(l->attn_k_norm, QWEN3_TENSOR_F32, 1, QWEN3_N_HEAD_DIM, 0, 0, err, err_size)) return false;
+        if (!tensor_expect_layout(l->ffn_norm, QWEN3_TENSOR_F32, 1, QWEN3_N_EMBD, 0, 0, err, err_size)) return false;
+        if (!tensor_expect_layout(l->ffn_gate, QWEN3_TENSOR_Q8_0, 2, QWEN3_N_EMBD, QWEN3_N_FF, 0, err, err_size)) return false;
+        if (!tensor_expect_layout(l->ffn_down, QWEN3_TENSOR_Q8_0, 2, QWEN3_N_FF, QWEN3_N_EMBD, 0, err, err_size)) return false;
+        if (!tensor_expect_layout(l->ffn_up, QWEN3_TENSOR_Q8_0, 2, QWEN3_N_EMBD, QWEN3_N_FF, 0, err, err_size)) return false;
+    }
+
+    return true;
+}
+
 bool qwen3_weights_bind(
     qwen3_weights *w,
     const gguf_file *g,
@@ -165,5 +263,5 @@ bool qwen3_weights_bind(
         if (!l->ffn_up) return false;
     }
 
-    return true;
+    return weights_validate_layout(w, err, err_size);
 }
